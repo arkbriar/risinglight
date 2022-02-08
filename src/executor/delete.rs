@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+use tracing::debug;
+
 use super::*;
 use crate::array::DataChunk;
 use crate::catalog::TableRefId;
@@ -15,8 +18,7 @@ pub struct DeleteExecutor<S: Storage> {
 }
 
 impl<S: Storage> DeleteExecutor<S> {
-    #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute_inner(self, ticker_tx: mpsc::Sender<()>) -> Result<i32, ExecutorError> {
         let table = self.storage.get_table(self.table_ref_id)?;
         let mut txn = table.update().await?;
         let mut cnt = 0;
@@ -31,12 +33,29 @@ impl<S: Storage> DeleteExecutor<S> {
                     row_handlers,
                     row_handler_idx,
                 );
+
+                if ticker_tx.send(()).await.is_err() {
+                    debug!("Abort");
+                    return Err(ExecutorError::Abort);
+                }
                 txn.delete(&row_handler).await?;
                 cnt += 1;
             }
         }
         txn.commit().await?;
 
-        yield DataChunk::single(cnt);
+        Ok(cnt as i32)
+    }
+
+    #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
+    pub async fn execute(self) {
+        let (ticker_tx, mut ticker_rx) = tokio::sync::mpsc::channel(1);
+
+        let handler = tokio::spawn(self.execute_inner(ticker_tx));
+
+        while ticker_rx.recv().await.is_some() {}
+
+        let rows = handler.await.expect("failed to join delete thread")?;
+        yield DataChunk::single(rows);
     }
 }

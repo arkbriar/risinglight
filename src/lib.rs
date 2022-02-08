@@ -13,6 +13,7 @@
 #![feature(backtrace)]
 #![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
+#![feature(proc_macro_hygiene, stmt_expr_attributes)]
 
 /// Top-level structure of the database.
 pub mod db;

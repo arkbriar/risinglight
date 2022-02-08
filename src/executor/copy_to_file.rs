@@ -1,6 +1,6 @@
 // Copyright 2022 RisingLight Project Authors. Licensed under Apache-2.0.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
@@ -23,26 +23,36 @@ impl CopyToFileExecutor {
             format,
             child,
         } = self;
-        let (sender, recver) = mpsc::channel(1);
-        let writer =
-            tokio::task::spawn_blocking(move || Self::write_file_blocking(path, format, recver));
+
+        let (tx, rx) = mpsc::channel(1);
+        let (complete_tx, mut complete_rx) = mpsc::channel(1);
+        let writer = tokio::task::spawn_blocking(|| {
+            Self::write_file_blocking(path, format, rx, complete_tx)
+        });
+
         #[for_await]
         for batch in child {
-            let res = sender.send(batch?).await;
+            let res = tx.send(batch?).await;
             if res.is_err() {
                 // send error means the background IO task returns error.
                 break;
             }
         }
-        drop(sender);
+        drop(tx);
+
+        // Block on the complete signal.
+        complete_rx.recv().await;
+
         let rows = writer.await.unwrap()?;
+
         yield DataChunk::single(rows as _);
     }
 
     fn write_file_blocking(
         path: PathBuf,
         format: FileFormat,
-        mut recver: mpsc::Receiver<DataChunk>,
+        mut rx: mpsc::Receiver<DataChunk>,
+        complete_tx: mpsc::Sender<()>,
     ) -> Result<usize, ExecutorError> {
         let file = File::create(&path)?;
         let mut writer = match format {
@@ -60,7 +70,7 @@ impl CopyToFileExecutor {
         };
 
         let mut rows = 0;
-        while let Some(chunk) = recver.blocking_recv() {
+        while let Some(chunk) = rx.blocking_recv() {
             for i in 0..chunk.cardinality() {
                 // TODO(wrj): avoid dynamic memory allocation (String)
                 let row = chunk.arrays().iter().map(|a| a.get_to_string(i));
@@ -69,6 +79,15 @@ impl CopyToFileExecutor {
             writer.flush()?;
             rows += chunk.cardinality();
         }
+
+        // Emit complete signal. Error means complete_rx is closed, i.e. tx is closed too.
+        // In such situation, we remove the file.
+        if complete_tx.blocking_send(()).is_err() {
+            drop(writer);
+            fs::remove_file(&path)?;
+            return Err(ExecutorError::Abort);
+        }
+
         Ok(rows)
     }
 }

@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+use tracing::debug;
+
 use super::*;
 use crate::array::{ArrayBuilderImpl, DataChunk};
 use crate::catalog::TableRefId;
@@ -17,8 +20,7 @@ pub struct InsertExecutor<S: Storage> {
 }
 
 impl<S: Storage> InsertExecutor<S> {
-    #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute_inner(self, ticker_tx: mpsc::Sender<()>) -> Result<i32, ExecutorError> {
         let table = self.storage.get_table(self.table_ref_id)?;
         let columns = table.columns()?;
         // Describe each column of the output chunks.
@@ -44,11 +46,31 @@ impl<S: Storage> InsertExecutor<S> {
         for chunk in self.child {
             let chunk = transform_chunk(chunk?, &output_columns);
             cnt += chunk.cardinality();
+
+            if ticker_tx.send(()).await.is_err() {
+                debug!("Abort");
+                return Err(ExecutorError::Abort);
+            }
+
             txn.append(chunk).await?;
         }
+
         txn.commit().await?;
 
-        yield DataChunk::single(cnt as i32);
+        Ok(cnt as i32)
+    }
+
+    #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
+    pub async fn execute(self) {
+        let (ticker_tx, mut ticker_rx) = mpsc::channel(1);
+
+        let handler = tokio::spawn(self.execute_inner(ticker_tx));
+
+        // Consume ticks to drive the execution.
+        while ticker_rx.recv().await.is_some() {}
+
+        let rows = handler.await.expect("failed to join insert thread")?;
+        yield DataChunk::single(rows);
     }
 }
 

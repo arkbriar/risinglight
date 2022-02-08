@@ -3,10 +3,11 @@
 //! A simple interactive shell of the database.
 
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use futures::future::abortable;
 use risinglight::array::{datachunk_to_sqllogictest_string, DataChunk};
 use risinglight::storage::SecondaryStorageOptions;
 use risinglight::Database;
@@ -29,6 +30,44 @@ struct Args {
     memory: bool,
 }
 
+fn print_result(ret: Result<Vec<DataChunk>, risinglight::Error>) {
+    match ret {
+        Ok(chunks) => {
+            for chunk in chunks {
+                println!("{}", chunk);
+            }
+        }
+        Err(err) => println!("{}", err),
+    }
+}
+
+async fn run_query_in_background(db: Arc<Database>, sql: String) {
+    let fut = async move { db.run(&sql).await };
+    let (task, abort_handle) = abortable(fut);
+
+    select! {
+        _ = signal::ctrl_c() => {
+            abort_handle.abort();
+            println!("Interrupted");
+        }
+        ret = tokio::spawn(task) => {
+            print_result(ret.unwrap().unwrap());
+        }
+    }
+}
+
+#[allow(dead_code)]
+async fn run_query(db: &Database, sql: String) {
+    select! {
+        _ = signal::ctrl_c() => {
+            println!("Interrupted");
+        }
+        ret = db.run(&sql) => {
+            print_result(ret);
+        }
+    }
+}
+
 /// Run RisingLight interactive mode
 async fn interactive(db: Database) -> Result<()> {
     let mut rl = Editor::<()>::new();
@@ -47,26 +86,15 @@ async fn interactive(db: Database) -> Result<()> {
             println!("No previous history. {err}");
         }
     }
+
+    let db = Arc::new(db);
+
     loop {
         let readline = rl.readline("> ");
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str());
-                select! {
-                    ret = db.run(&line) => {
-                        match ret {
-                            Ok(chunks) => {
-                                for chunk in chunks {
-                                    println!("{}", chunk);
-                                }
-                            }
-                            Err(err) => println!("{}", err),
-                        }
-                    },
-                    _ = signal::ctrl_c() => {
-                        println!("Interrupted");
-                    }
-                }
+                run_query_in_background(db.clone(), line).await;
             }
             Err(ReadlineError::Interrupted) => {
                 println!("Interrupted");

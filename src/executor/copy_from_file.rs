@@ -5,6 +5,7 @@ use std::io::BufReader;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::sync::mpsc::Sender;
+use tracing::debug;
 
 use super::*;
 use crate::array::ArrayBuilderImpl;
@@ -110,8 +111,12 @@ impl CopyFromFileExecutor {
 
             // send data chunk
             let chunk: DataChunk = array_builders.into_iter().collect();
-            if chunk.cardinality() > 0 {
-                tx.blocking_send(chunk).unwrap();
+            if chunk.cardinality() == 0 {
+                continue;
+            }
+            if tx.blocking_send(chunk).is_err() {
+                debug!("Abort");
+                return Err(ExecutorError::Abort);
             }
         }
         bar.finish();

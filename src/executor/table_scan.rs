@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+use tracing::debug;
+
 use super::*;
 use crate::array::{ArrayBuilder, ArrayBuilderImpl, DataChunk, I64ArrayBuilder};
 use crate::binder::BoundExpr;
@@ -52,8 +55,10 @@ impl<S: Storage> TableScanExecutor<S> {
         Ok(chunk)
     }
 
-    #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute_inner(self) {
+    pub async fn execute_inner(
+        self,
+        tx: mpsc::Sender<Result<DataChunk, ExecutorError>>,
+    ) -> Result<(), ExecutorError> {
         let table = self.storage.get_table(self.plan.logical().table_ref_id())?;
 
         // TODO: remove this when we have schema
@@ -90,8 +95,15 @@ impl<S: Storage> TableScanExecutor<S> {
             match it.next_batch(None).await {
                 Ok(x) => {
                     if let Some(x) = x {
-                        yield x;
                         have_chunk = true;
+
+                        // Send chunk and abort transaction if failed,
+                        // e.g. when receiver closed on cancellation.
+                        if tx.send(Ok(x)).await.is_err() {
+                            txn.abort().await?;
+                            debug!("Abort");
+                            return Err(ExecutorError::Abort);
+                        }
                     } else {
                         break;
                     }
@@ -106,26 +118,25 @@ impl<S: Storage> TableScanExecutor<S> {
         txn.abort().await?;
 
         if !have_chunk {
-            yield empty_chunk;
+            tx.send(Ok(empty_chunk)).await.map_err(|_| {
+                debug!("Abort");
+                ExecutorError::Abort
+            })?;
         }
+
+        Ok(())
     }
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
     pub async fn execute(self) {
         // Buffer at most 128 chunks in memory
-        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
-        let handler = tokio::spawn(async move {
-            let mut stream = self.execute_inner();
-            while let Some(result) = stream.next().await {
-                tx.send(result)
-                    .await
-                    .expect("failed to send chunk to compute thread");
-            }
-        });
-
+        let (tx, mut rx) = mpsc::channel(128);
+        let handler = tokio::spawn(self.execute_inner(tx));
         while let Some(item) = rx.recv().await {
             yield item?;
         }
-        handler.await.expect("failed to join scan thread");
+
+        // Return error of inner execution.
+        handler.await.expect("failed to join scan thread")?;
     }
 }
