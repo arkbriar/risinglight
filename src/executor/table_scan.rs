@@ -129,8 +129,8 @@ impl<S: Storage> TableScanExecutor<S> {
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
     pub async fn execute(self) {
-        // Buffer at most 128 chunks in memory
-        let (tx, mut rx) = mpsc::channel(128);
+        // Buffer size 1 to let receive have chance to stop when abort.
+        let (tx, mut rx) = mpsc::channel(1);
         let handler = tokio::spawn(self.execute_inner(tx));
         while let Some(item) = rx.recv().await {
             yield item?;
