@@ -27,6 +27,24 @@ pub struct RowSetIterator {
 }
 
 impl RowSetIterator {
+    async fn new_column_iterator(
+        rowset: Arc<DiskRowset>,
+        start_row_id: u32,
+        column_ref: StorageColumnRef,
+    ) -> StorageResult<Option<ColumnIteratorImpl>> {
+        return match column_ref {
+            StorageColumnRef::RowHandler => Ok(None),
+            StorageColumnRef::Idx(idx) => Ok(Some(
+                ColumnIteratorImpl::new(
+                    rowset.column(idx as usize),
+                    rowset.column_info(idx as usize),
+                    start_row_id,
+                )
+                .await?,
+            )),
+        };
+    }
+
     pub async fn new(
         rowset: Arc<DiskRowset>,
         column_refs: Arc<[StorageColumnRef]>,
@@ -56,22 +74,24 @@ impl RowSetIterator {
             panic!("no user column")
         }
 
-        let mut column_iterators: Vec<Option<ColumnIteratorImpl>> = vec![];
-
-        for column_ref in &*column_refs {
-            // TODO: parallel seek
-            match column_ref {
-                StorageColumnRef::RowHandler => column_iterators.push(None),
-                StorageColumnRef::Idx(idx) => column_iterators.push(Some(
-                    ColumnIteratorImpl::new(
-                        rowset.column(*idx as usize),
-                        rowset.column_info(*idx as usize),
-                        start_row_id,
-                    )
-                    .await?,
-                )),
-            };
-        }
+        let column_iterators = if column_refs.len() == 1 {
+            vec![
+                Self::new_column_iterator(
+                    rowset.clone(),
+                    start_row_id,
+                    *column_refs.first().unwrap(),
+                )
+                .await?,
+            ]
+        } else {
+            let column_iterator_futures = (&*column_refs)
+                .iter()
+                .map(|column_ref| {
+                    Self::new_column_iterator(rowset.clone(), start_row_id, *column_ref)
+                })
+                .collect::<Vec<_>>();
+            futures::future::try_join_all(column_iterator_futures).await?
+        };
 
         let filter_expr = if let Some(expr) = expr {
             let filter_column = expr.get_filter_column(column_refs.len());
