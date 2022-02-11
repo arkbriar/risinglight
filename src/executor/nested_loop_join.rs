@@ -21,7 +21,7 @@ pub struct NestedLoopJoinExecutor {
 
 impl NestedLoopJoinExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, context: Arc<Context>) {
         // collect all chunks from children
         let (left_chunks, right_chunks) = async {
             tokio::try_join!(
@@ -46,6 +46,10 @@ impl NestedLoopJoinExecutor {
         let mut builders = create_builders();
         for left_row in left_rows() {
             for right_row in right_rows() {
+                if context.is_cancelled() {
+                    return Err(ExecutorError::Abort);
+                }
+
                 let values = left_row.values().chain(right_row.values());
                 for (builder, v) in builders.iter_mut().zip_eq(values) {
                     builder.push(&v);

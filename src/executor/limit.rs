@@ -12,7 +12,7 @@ pub struct LimitExecutor {
 
 impl LimitExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         // the number of rows have been processed
         let mut processed = 0;
 
@@ -64,7 +64,12 @@ mod tests {
             offset,
             limit,
         };
-        let actual = executor.execute().try_collect::<Vec<_>>().await.unwrap();
+        let context = Arc::new(Default::default());
+        let actual = executor
+            .execute(context)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
         let outputs = outputs.iter().map(range_to_chunk).collect_vec();
         assert_eq!(actual, outputs);
     }

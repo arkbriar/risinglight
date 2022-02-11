@@ -15,7 +15,7 @@ pub struct ValuesExecutor {
 
 impl ValuesExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         for chunk in self.values.chunks(PROCESSING_WINDOW_SIZE) {
             // Create array builders.
             let mut builders = self
@@ -58,7 +58,8 @@ mod tests {
                 })
                 .collect_vec(),
         };
-        let output = executor.execute().next().await.unwrap().unwrap();
+        let context = Arc::new(Default::default());
+        let output = executor.execute(context).next().await.unwrap().unwrap();
         let expected = [
             ArrayImpl::Int32((0..4).collect()),
             ArrayImpl::Int32((100..104).collect()),

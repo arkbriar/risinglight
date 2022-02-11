@@ -18,33 +18,6 @@ use futures::stream::{BoxStream, StreamExt};
 use futures_async_stream::try_stream;
 use itertools::Itertools;
 
-use crate::array::DataChunk;
-use crate::optimizer::plan_nodes::*;
-use crate::optimizer::PlanVisitor;
-use crate::storage::{StorageImpl, TracedStorageError};
-use crate::types::ConvertError;
-
-mod aggregation;
-mod copy_from_file;
-mod copy_to_file;
-mod create;
-mod delete;
-mod drop;
-mod dummy_scan;
-pub mod evaluator;
-mod explain;
-mod filter;
-mod hash_agg;
-mod hash_join;
-mod insert;
-mod limit;
-mod nested_loop_join;
-mod order;
-mod projection;
-mod simple_agg;
-mod table_scan;
-mod values;
-
 pub use self::aggregation::*;
 use self::copy_from_file::*;
 use self::copy_to_file::*;
@@ -64,6 +37,34 @@ use self::projection::*;
 use self::simple_agg::*;
 use self::table_scan::*;
 use self::values::*;
+use crate::array::DataChunk;
+use crate::executor::context::Context;
+use crate::optimizer::plan_nodes::*;
+use crate::optimizer::PlanVisitor;
+use crate::storage::{StorageImpl, TracedStorageError};
+use crate::types::ConvertError;
+
+mod aggregation;
+pub mod context;
+mod copy_from_file;
+mod copy_to_file;
+mod create;
+mod delete;
+mod drop;
+mod dummy_scan;
+pub mod evaluator;
+mod explain;
+mod filter;
+mod hash_agg;
+mod hash_join;
+mod insert;
+mod limit;
+mod nested_loop_join;
+mod order;
+mod projection;
+mod simple_agg;
+mod table_scan;
+mod values;
 
 /// The error type of execution.
 #[derive(thiserror::Error, Debug)]
@@ -95,6 +96,8 @@ pub enum ExecutorError {
     ),
     #[error("value can not be null")]
     NotNullable,
+    #[error("abort")]
+    Abort,
 }
 
 /// The maximum chunk length produced by executor at a time.
@@ -111,13 +114,18 @@ pub type BoxedExecutor = BoxStream<'static, Result<DataChunk, ExecutorError>>;
 /// The builder of executor.
 #[derive(Clone)]
 pub struct ExecutorBuilder {
+    context: Arc<Context>,
     storage: StorageImpl,
 }
 
 impl ExecutorBuilder {
     /// Create a new executor builder.
     pub fn new(storage: StorageImpl) -> ExecutorBuilder {
-        ExecutorBuilder { storage }
+        Self::new_with_context(Default::default(), storage)
+    }
+
+    pub fn new_with_context(context: Arc<Context>, storage: StorageImpl) -> ExecutorBuilder {
+        ExecutorBuilder { context, storage }
     }
 
     pub fn build(&mut self, plan: PlanRef) -> BoxedExecutor {
@@ -127,7 +135,7 @@ impl ExecutorBuilder {
 
 impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
     fn visit_dummy(&mut self, _plan: &Dummy) -> Option<BoxedExecutor> {
-        Some(DummyScanExecutor.execute())
+        Some(DummyScanExecutor.execute(self.context.clone()))
     }
 
     fn visit_physical_create_table(&mut self, plan: &PhysicalCreateTable) -> Option<BoxedExecutor> {
@@ -136,12 +144,12 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 plan: plan.clone(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
             StorageImpl::SecondaryStorage(storage) => CreateTableExecutor {
                 plan: plan.clone(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         })
     }
 
@@ -151,12 +159,12 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 plan: plan.clone(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
             StorageImpl::SecondaryStorage(storage) => DropExecutor {
                 plan: plan.clone(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         })
     }
 
@@ -168,14 +176,14 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 storage: storage.clone(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
             StorageImpl::SecondaryStorage(storage) => InsertExecutor {
                 table_ref_id: plan.logical().table_ref_id(),
                 column_ids: plan.logical().column_ids().to_vec(),
                 storage: storage.clone(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         })
     }
 
@@ -194,7 +202,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 left_types: plan.left().out_types(),
                 right_types: plan.right().out_types(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -205,13 +213,13 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 expr: None,
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
             StorageImpl::SecondaryStorage(storage) => TableScanExecutor {
                 plan: plan.clone(),
                 expr: plan.logical().expr().cloned(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         })
     }
 
@@ -221,7 +229,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 project_expressions: plan.logical().project_expressions().to_vec(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -231,7 +239,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 expr: plan.logical().expr().clone(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -241,7 +249,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 comparators: plan.logical().comparators().to_vec(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -252,12 +260,12 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 offset: plan.logical().offset(),
                 limit: plan.logical().limit(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
     fn visit_physical_explain(&mut self, plan: &PhysicalExplain) -> Option<BoxedExecutor> {
-        Some(ExplainExecutor { plan: plan.clone() }.execute())
+        Some(ExplainExecutor { plan: plan.clone() }.execute(self.context.clone()))
     }
 
     fn visit_physical_hash_agg(&mut self, plan: &PhysicalHashAgg) -> Option<BoxedExecutor> {
@@ -267,7 +275,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 group_keys: plan.logical().group_keys().to_vec(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -285,7 +293,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 left_types: plan.left().out_types(),
                 right_types: plan.right().out_types(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -295,7 +303,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 agg_calls: plan.agg_calls().to_vec(),
                 child: self.visit(plan.child()).unwrap(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -307,13 +315,13 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 table_ref_id: plan.logical().table_ref_id(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
             StorageImpl::SecondaryStorage(storage) => DeleteExecutor {
                 child,
                 table_ref_id: plan.logical().table_ref_id(),
                 storage: storage.clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         })
     }
 
@@ -323,7 +331,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 column_types: plan.logical().column_types().to_vec(),
                 values: plan.logical().values().to_vec(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 
@@ -331,7 +339,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
         &mut self,
         plan: &PhysicalCopyFromFile,
     ) -> Option<BoxedExecutor> {
-        Some(CopyFromFileExecutor { plan: plan.clone() }.execute())
+        Some(CopyFromFileExecutor { plan: plan.clone() }.execute(self.context.clone()))
     }
 
     fn visit_physical_copy_to_file(&mut self, plan: &PhysicalCopyToFile) -> Option<BoxedExecutor> {
@@ -341,7 +349,7 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
                 path: plan.logical().path().clone(),
                 format: plan.logical().format().clone(),
             }
-            .execute(),
+            .execute(self.context.clone()),
         )
     }
 }

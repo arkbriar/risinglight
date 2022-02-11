@@ -93,17 +93,25 @@ impl HashAggExecutor {
     }
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, context: Arc<Context>) {
         let mut state_entries = HashMap::new();
 
         #[for_await]
         for chunk in self.child {
+            if context.is_cancelled() {
+                return Err(ExecutorError::Abort);
+            }
+
             let chunk = chunk?;
             Self::execute_inner(&mut state_entries, chunk, &self.agg_calls, &self.group_keys)?;
         }
 
         #[for_await]
         for chunk in Self::finish_agg(state_entries, self.agg_calls, self.group_keys) {
+            if context.is_cancelled() {
+                return Err(ExecutorError::Abort);
+            }
+
             let chunk = chunk?;
             yield chunk
         }

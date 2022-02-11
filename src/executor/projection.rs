@@ -12,7 +12,7 @@ pub struct ProjectionExecutor {
 
 impl ProjectionExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         #[for_await]
         for batch in self.child {
             let batch = batch?;

@@ -14,7 +14,7 @@ pub struct DropExecutor<S: Storage> {
 
 impl<S: Storage> DropExecutor<S> {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         match self.plan.logical().object().clone() {
             Object::Table(ref_id) => self.storage.drop_table(ref_id).await?,
         }

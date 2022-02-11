@@ -14,7 +14,7 @@ pub struct OrderExecutor {
 
 impl OrderExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         // collect all chunks
         let mut chunks = vec![];
         #[for_await]

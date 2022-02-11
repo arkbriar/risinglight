@@ -3,15 +3,17 @@
 //! A simple interactive shell of the database.
 
 use std::fs::File;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use risinglight::array::{datachunk_to_sqllogictest_string, DataChunk};
+use risinglight::executor::context::Context;
 use risinglight::storage::SecondaryStorageOptions;
 use risinglight::Database;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use tokio::{select, signal};
 use tracing::{info, warn, Level};
 use tracing_subscriber::prelude::*;
 
@@ -43,6 +45,31 @@ fn print_chunk(chunk: &DataChunk) {
     }
 }
 
+async fn run_query_in_background(db: Arc<Database>, sql: String) {
+    let context: Arc<Context> = Default::default();
+    let handle = tokio::spawn({
+        let context = context.clone();
+        async move { db.run_with_context(context, &sql).await }
+    });
+
+    select! {
+        _ = signal::ctrl_c() => {
+            context.cancel();
+            println!("Interrupted");
+        }
+        ret = handle => {
+            match ret.expect("failed to join query thread") {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        print_chunk(&chunk)
+                    }
+                }
+                Err(err) => println!("{}", err),
+            }
+        }
+    }
+}
+
 /// Run RisingLight interactive mode
 async fn interactive(db: Database) -> Result<()> {
     let mut rl = Editor::<()>::new();
@@ -61,20 +88,15 @@ async fn interactive(db: Database) -> Result<()> {
             println!("No previous history. {err}");
         }
     }
+
+    let db = Arc::new(db);
+
     loop {
         let readline = rl.readline("> ");
         match readline {
             Ok(line) => {
                 rl.add_history_entry(line.as_str());
-                let ret = db.run(&line).await;
-                match ret {
-                    Ok(chunks) => {
-                        for chunk in chunks {
-                            print_chunk(&chunk)
-                        }
-                    }
-                    Err(err) => println!("{}", err),
-                }
+                run_query_in_background(db.clone(), line).await;
             }
             Err(ReadlineError::Interrupted) => {
                 println!("Interrupted");

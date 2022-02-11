@@ -17,7 +17,7 @@ pub struct CopyToFileExecutor {
 
 impl CopyToFileExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         let Self {
             path,
             format,
@@ -101,7 +101,8 @@ mod tests {
             }
             .boxed(),
         };
-        executor.execute().next().await.unwrap().unwrap();
+        let context = Arc::new(Default::default());
+        executor.execute(context).next().await.unwrap().unwrap();
 
         let actual = std::fs::read_to_string(file.path()).unwrap();
         let expected = "1,1.5,one\n2,2.5,two\n";

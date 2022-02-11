@@ -21,7 +21,7 @@ const IMPORT_PROGRESS_BAR_LIMIT: u64 = 1024 * 1024;
 
 impl CopyFromFileExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let handle = tokio::task::spawn_blocking(|| self.read_file_blocking(tx));
         while let Some(chunk) = rx.recv().await {
@@ -155,7 +155,9 @@ mod tests {
                 ],
             )),
         };
-        let actual = executor.execute().next().await.unwrap().unwrap();
+
+        let context = Arc::new(Default::default());
+        let actual = executor.execute(context).next().await.unwrap().unwrap();
 
         let expected: DataChunk = [
             ArrayImpl::Int32([1, 2].into_iter().collect()),

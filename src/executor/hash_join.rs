@@ -25,7 +25,7 @@ pub struct HashJoinExecutor {
 
 impl HashJoinExecutor {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, context: Arc<Context>) {
         // collect all chunks from children
         let (left_chunks, right_chunks) = async {
             tokio::try_join!(
@@ -42,6 +42,10 @@ impl HashJoinExecutor {
         // build
         let mut hash_map: HashMap<DataValue, Vec<RowRef<'_>>> = HashMap::new();
         for left_row in left_rows() {
+            if context.is_cancelled() {
+                return Err(ExecutorError::Abort);
+            }
+
             let hash_value = left_row.get(self.left_column_index);
             hash_map
                 .entry(hash_value)
@@ -55,6 +59,10 @@ impl HashJoinExecutor {
             .map(|ty| ArrayBuilderImpl::with_capacity(PROCESSING_WINDOW_SIZE, ty))
             .collect_vec();
         for right_row in right_rows() {
+            if context.is_cancelled() {
+                return Err(ExecutorError::Abort);
+            }
+
             let hash_value = right_row.get(self.right_column_index);
             for left_row in hash_map.get(&hash_value).unwrap_or(&vec![]) {
                 let values = left_row.values().chain(right_row.values());

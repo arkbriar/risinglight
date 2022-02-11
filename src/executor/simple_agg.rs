@@ -51,7 +51,7 @@ impl SimpleAggExecutor {
     }
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         let mut states = create_agg_states(&self.agg_calls);
 
         #[for_await]

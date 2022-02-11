@@ -18,7 +18,7 @@ pub struct InsertExecutor<S: Storage> {
 
 impl<S: Storage> InsertExecutor<S> {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         let table = self.storage.get_table(self.table_ref_id)?;
         let columns = table.columns()?;
         // Describe each column of the output chunks.
@@ -106,7 +106,8 @@ mod tests {
             }
             .boxed(),
         };
-        executor.execute().next().await.unwrap().unwrap();
+        let context = Arc::new(Default::default());
+        executor.execute(context).next().await.unwrap().unwrap();
     }
 
     async fn create_table() -> StorageImpl {
@@ -120,11 +121,12 @@ mod tests {
                 ColumnCatalog::new(1, DataTypeKind::Int(None).not_null().to_column("v2".into())),
             ],
         ));
+        let context = Arc::new(Default::default());
         let mut executor = CreateTableExecutor {
             plan,
             storage: storage.as_in_memory_storage(),
         }
-        .execute()
+        .execute(context)
         .boxed();
         executor.next().await.unwrap().unwrap();
         storage

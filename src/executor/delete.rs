@@ -16,7 +16,7 @@ pub struct DeleteExecutor<S: Storage> {
 
 impl<S: Storage> DeleteExecutor<S> {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         let table = self.storage.get_table(self.table_ref_id)?;
         let mut txn = table.update().await?;
         let mut cnt = 0;

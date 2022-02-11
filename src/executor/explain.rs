@@ -10,7 +10,7 @@ pub struct ExplainExecutor {
 }
 
 impl ExplainExecutor {
-    pub fn execute(self) -> BoxedExecutor {
+    pub fn execute(self, _context: Arc<Context>) -> BoxedExecutor {
         let mut explain_result = String::new();
         self.plan.child().explain(0, &mut explain_result).unwrap();
         let mut chunk = DataChunk::from_iter([ArrayImpl::Utf8(Utf8Array::from_iter([Some(

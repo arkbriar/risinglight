@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
+
 use super::*;
 use crate::array::{ArrayBuilder, ArrayBuilderImpl, DataChunk, I64ArrayBuilder};
 use crate::binder::BoundExpr;
@@ -53,7 +56,7 @@ impl<S: Storage> TableScanExecutor<S> {
     }
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute_inner(self) {
+    pub async fn execute_inner(self, token: CancellationToken) {
         let table = self.storage.get_table(self.plan.logical().table_ref_id())?;
 
         // TODO: remove this when we have schema
@@ -73,6 +76,9 @@ impl<S: Storage> TableScanExecutor<S> {
             col_idx.push(StorageColumnRef::RowHandler);
         }
 
+        if token.is_cancelled() {
+            return Err(ExecutorError::Abort);
+        }
         let txn = table.read().await?;
 
         let mut it = txn
@@ -87,6 +93,10 @@ impl<S: Storage> TableScanExecutor<S> {
             .await?;
 
         loop {
+            if token.is_cancelled() {
+                txn.abort().await?;
+                return Err(ExecutorError::Abort);
+            }
             match it.next_batch(None).await {
                 Ok(x) => {
                     if let Some(x) = x {
@@ -111,21 +121,25 @@ impl<S: Storage> TableScanExecutor<S> {
     }
 
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, context: Arc<Context>) {
         // Buffer at most 128 chunks in memory
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+
+        let child_token = context.child_cancellation_token();
         let handler = tokio::spawn(async move {
-            let mut stream = self.execute_inner();
+            let mut stream = self.execute_inner(child_token);
             while let Some(result) = stream.next().await {
-                tx.send(result)
-                    .await
-                    .expect("failed to send chunk to compute thread");
+                if tx.send(result).await.is_err() {
+                    warn!("Abort");
+                    return Err(ExecutorError::Abort);
+                }
             }
+            Ok(())
         });
 
         while let Some(item) = rx.recv().await {
             yield item?;
         }
-        handler.await.expect("failed to join scan thread");
+        handler.await.expect("failed to join scan thread")?;
     }
 }

@@ -14,7 +14,7 @@ pub struct CreateTableExecutor<S: Storage> {
 
 impl<S: Storage> CreateTableExecutor<S> {
     #[try_stream(boxed, ok = DataChunk, error = ExecutorError)]
-    pub async fn execute(self) {
+    pub async fn execute(self, _context: Arc<Context>) {
         self.storage
             .create_table(
                 self.plan.logical().database_id(),
@@ -53,7 +53,10 @@ mod tests {
                 ColumnCatalog::new(1, DataTypeKind::Int(None).not_null().to_column("v2".into())),
             ],
         ));
-        let mut executor = CreateTableExecutor { plan, storage }.execute().boxed();
+        let context = Arc::new(Default::default());
+        let mut executor = CreateTableExecutor { plan, storage }
+            .execute(context)
+            .boxed();
         executor.next().await.unwrap().unwrap();
 
         let id = TableRefId {
