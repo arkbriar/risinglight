@@ -12,31 +12,14 @@
 //!
 //! [`try_stream`]: async_stream::try_stream
 
+use std::future::Future;
 use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt};
 use futures_async_stream::try_stream;
 use itertools::Itertools;
+use tokio_util::sync::CancellationToken;
 
-pub use self::aggregation::*;
-use self::copy_from_file::*;
-use self::copy_to_file::*;
-use self::create::*;
-use self::delete::*;
-use self::drop::*;
-use self::dummy_scan::*;
-use self::explain::*;
-use self::filter::*;
-use self::hash_agg::*;
-use self::hash_join::*;
-use self::insert::*;
-use self::limit::*;
-use self::nested_loop_join::*;
-use self::order::*;
-use self::projection::*;
-use self::simple_agg::*;
-use self::table_scan::*;
-use self::values::*;
 use crate::array::DataChunk;
 use crate::executor::context::Context;
 use crate::optimizer::plan_nodes::*;
@@ -65,6 +48,26 @@ mod projection;
 mod simple_agg;
 mod table_scan;
 mod values;
+
+pub use self::aggregation::*;
+use self::copy_from_file::*;
+use self::copy_to_file::*;
+use self::create::*;
+use self::delete::*;
+use self::drop::*;
+use self::dummy_scan::*;
+use self::explain::*;
+use self::filter::*;
+use self::hash_agg::*;
+use self::hash_join::*;
+use self::insert::*;
+use self::limit::*;
+use self::nested_loop_join::*;
+use self::order::*;
+use self::projection::*;
+use self::simple_agg::*;
+use self::table_scan::*;
+use self::values::*;
 
 /// The error type of execution.
 #[derive(thiserror::Error, Debug)]
@@ -351,5 +354,50 @@ impl PlanVisitor<BoxedExecutor> for ExecutorBuilder {
             }
             .execute(self.context.clone()),
         )
+    }
+}
+
+pub async fn token_await<O>(
+    token: &CancellationToken,
+    f: impl Future<Output = O>,
+) -> Result<O, ExecutorError> {
+    tokio::select! {
+        _ = token.cancelled() => {
+            Err(ExecutorError::Abort)
+        }
+        ret = f => {
+            Ok(ret)
+        }
+    }
+}
+
+pub async fn executor_token_await<T, E>(
+    token: &CancellationToken,
+    f: impl Future<Output = Result<T, E>>,
+) -> Result<T, ExecutorError>
+where
+    ExecutorError: From<E>,
+{
+    tokio::select! {
+        _ = token.cancelled() => {
+            Err(ExecutorError::Abort)
+        }
+        ret = f => {
+            Ok(ret?)
+        }
+    }
+}
+
+pub async fn context_await<F>(context: &Context, f: F) -> Result<F::Output, ExecutorError>
+where
+    F: Future,
+{
+    tokio::select! {
+        _ = context.cancelled() => {
+            Err(ExecutorError::Abort)
+        }
+        ret = f => {
+            Ok(ret)
+        }
     }
 }

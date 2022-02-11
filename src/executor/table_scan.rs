@@ -81,23 +81,35 @@ impl<S: Storage> TableScanExecutor<S> {
         }
         let txn = table.read().await?;
 
-        let mut it = txn
-            .scan(
+        let mut it = match executor_token_await(
+            &token,
+            txn.scan(
                 None,
                 None,
                 &col_idx,
                 self.plan.logical().is_sorted(),
                 false,
                 self.expr,
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(it) => it,
+            Err(err) => {
+                txn.abort().await?;
+                return Err(err);
+            }
+        };
 
         loop {
-            if token.is_cancelled() {
-                txn.abort().await?;
-                return Err(ExecutorError::Abort);
-            }
-            match it.next_batch(None).await {
+            let chunk = match token_await(&token, it.next_batch(None)).await {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    txn.abort().await?;
+                    return Err(err);
+                }
+            };
+            match chunk {
                 Ok(x) => {
                     if let Some(x) = x {
                         yield x;

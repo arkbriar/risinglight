@@ -29,6 +29,10 @@ impl Context {
     pub fn is_cancelled(&self) -> bool {
         unsafe { intrinsics::unlikely(self.token.is_cancelled()) }
     }
+
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await
+    }
 }
 
 impl Default for Context {
